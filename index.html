@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    
+    <!-- Настройки для того, чтобы игра выглядела как приложение (без рамок) -->
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="theme-color" content="#000000">
+
+    <title>Лес: Записки</title>
+    <style>
+        * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+        body { margin: 0; overflow: hidden; background: #000; font-family: 'Courier New', monospace; user-select: none; touch-action: none; }
+        canvas { display: block; width: 100vw; height: 100vh; }
+
+        /* МЕНЮ */
+        #menu {
+            position: fixed; inset: 0; background: #000; color: #f00;
+            display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 1000;
+        }
+        #menu h1 { font-size: 10vh; text-shadow: 0 0 20px #f00; margin: 0 0 20px 0; letter-spacing: 10px; }
+        .slider-group { margin: 10px; text-align: center; width: 70%; max-width: 400px; color: #fff; }
+        label { font-size: 14px; letter-spacing: 2px; }
+        input[type=range] { width: 100%; height: 40px; accent-color: #f00; cursor: pointer; }
+        
+        #start-btn { 
+            padding: 15px 50px; font-size: 24px; background: #300; color: #fff; border: 2px solid #f00; 
+            border-radius: 5px; cursor: pointer; margin-top: 20px; box-shadow: 0 0 15px #f00;
+            text-transform: uppercase; letter-spacing: 3px;
+        }
+
+        /* ИНТЕРФЕЙС ГРАФИКА */
+        #hud { position: absolute; top: 20px; left: 20px; color: white; pointer-events: none; display: none; z-index: 50; }
+        #stamina-box { width: 150px; height: 8px; background: #222; border: 1px solid #fff; margin-top: 5px; }
+        #stamina-fill { width: 100%; height: 100%; background: #0f0; transition: width 0.1s; }
+        #notes-text { font-size: 20px; font-weight: bold; text-shadow: 2px 2px #000; }
+
+        /* ДЖОЙСТИК (ПРАВИЛЬНЫЙ) */
+        #joy-zone { 
+            position: absolute; bottom: 10%; left: 10%; width: 140px; height: 140px; 
+            background: rgba(255,255,255,0.05); border-radius: 50%; border: 1px solid rgba(255,255,255,0.2); z-index: 100;
+        }
+        #joy-stick { 
+            position: absolute; width: 60px; height: 60px; background: rgba(255,255,255,0.3); 
+            border-radius: 50%; top: 40px; left: 40px; pointer-events: none;
+        }
+
+        /* КНОПКА БЕГА */
+        #sprint-btn { 
+            position: absolute; bottom: 12%; right: 10%; width: 85px; height: 85px; 
+            background: rgba(150,0,0,0.2); border: 2px solid rgba(255,255,255,0.5); border-radius: 50%; 
+            display: flex; align-items: center; justify-content: center; color: white; font-weight: bold; z-index: 100;
+        }
+
+        /* ЭФФЕКТЫ */
+        #screamer { position: fixed; inset: 0; background-color: black; background-position: center; background-size: cover; display: none; z-index: 2000; }
+        #blood { position: fixed; inset: 0; background: rgba(180, 0, 0, 0.3); display: none; pointer-events: none; z-index: 5; }
+        #crosshair { position: fixed; top: 50%; left: 50%; width: 4px; height: 4px; background: #fff; border-radius: 50%; transform: translate(-50%, -50%); opacity: 0.5; pointer-events: none; }
+    </style>
+</head>
+<body>
+
+<div id="menu">
+    <h1>ЛЕС</h1>
+    <div class="slider-group">
+        <label>ЧУВСТВИТЕЛЬНОСТЬ</label><br>
+        <input type="range" id="sens" min="5" max="150" value="70">
+    </div>
+    <div class="slider-group">
+        <label>ГРОМКОСТЬ</label><br>
+        <input type="range" id="vol" min="0" max="100" value="70">
+    </div>
+    <button id="start-btn">ИГРАТЬ</button>
+</div>
+
+<div id="hud">
+    <div id="notes-text">ЗАПИСКИ: 0 / 10</div>
+    <div id="stamina-box"><div id="stamina-fill"></div></div>
+</div>
+
+<div id="blood"></div>
+<div id="screamer"></div>
+<div id="crosshair"></div>
+<div id="joy-zone"><div id="joy-stick"></div></div>
+<div id="sprint-btn">БЕГ</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+<script>
+/** НАСТРОЙКИ И ПЕРЕМЕННЫЕ **/
+let scene, camera, renderer, clock, flashlight;
+let moveDir = { f: 0, s: 0 };
+let lookData = { id: null, lastX: 0, lastY: 0 };
+let joyData = { id: null, centerX: 0, centerY: 0 };
+let stats = { notes: 0, stamina: 100, isSprinting: false, sens: 0.002 };
+let monster, monsterState = 'idle', monsterTime = 0;
+let trees = [], notes = [], screamerImages = ["scary1.png", "scary2.png", "scary3.png"];
+let randomScreamerIndices = [];
+
+// Аудио
+const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+let masterGain = audioCtx.createGain();
+masterGain.connect(audioCtx.destination);
+
+function playSnd(freq, type, duration, vol) {
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    const osc = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+    g.gain.setValueAtTime(vol, audioCtx.currentTime);
+    g.gain.linearRampToValueAtTime(0, audioCtx.currentTime + duration);
+    osc.connect(g); g.connect(masterGain);
+    osc.start(); osc.stop(audioCtx.currentTime + duration);
+}
+
+/** ИНИЦИАЛИЗАЦИЯ МИРА **/
+function init() {
+    scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x000105);
+    scene.fog = new THREE.FogExp2(0x000105, 0.07);
+
+    camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
+    camera.rotation.order = 'YXZ';
+    
+    renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    document.body.appendChild(renderer.domElement);
+
+    // ФОНАРЬ
+    flashlight = new THREE.SpotLight(0xffffff, 5, 60, Math.PI/4.5, 0.5, 1);
+    camera.add(flashlight);
+    flashlight.position.set(0, 0, 0.1);
+    flashlight.target = new THREE.Object3D();
+    camera.add(flashlight.target);
+    flashlight.target.position.set(0, 0, -1);
+
+    const ambient = new THREE.PointLight(0xffffff, 0.4, 12);
+    camera.add(ambient);
+    scene.add(camera);
+
+    // ПОЛ
+    const ground = new THREE.Mesh(new THREE.PlaneGeometry(600, 600), new THREE.MeshPhongMaterial({ color: 0x050805 }));
+    ground.rotation.x = -Math.PI/2;
+    scene.add(ground);
+
+    // ЛЕС
+    const treeGeo = new THREE.CylinderGeometry(0.5, 0.7, 12, 6);
+    const treeMat = new THREE.MeshPhongMaterial({ color: 0x110a05 });
+    
+    for(let i=0; i<160; i++) {
+        let tree = new THREE.Mesh(treeGeo, treeMat);
+        tree.position.set(Math.random()*250-125, 6, Math.random()*250-125);
+        scene.add(tree);
+        trees.push(tree);
+
+        if(i < 10) {
+            let note = new THREE.Mesh(new THREE.PlaneGeometry(0.5, 0.6), new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0xffffff, emissiveIntensity: 1.5 }));
+            note.position.set(0, -3, 0.75);
+            note.userData = { id: i };
+            tree.add(note);
+            let nLight = new THREE.PointLight(0xffffff, 2.5, 8);
+            note.add(nLight);
+            notes.push(note);
+        }
+    }
+
+    while(randomScreamerIndices.length < 3) {
+        let r = Math.floor(Math.random()*10);
+        if(!randomScreamerIndices.includes(r)) randomScreamerIndices.push(r);
+    }
+
+    createMonster();
+    clock = new THREE.Clock();
+    setupControls();
+    animate();
+}
+
+function createMonster() {
+    monster = new THREE.Group();
+    const body = new THREE.Mesh(new THREE.BoxGeometry(1.2, 4.5, 0.6), new THREE.MeshBasicMaterial({ color: 0x000000 }));
+    monster.add(body);
+    const eyeGeo = new THREE.SphereGeometry(0.15, 8, 8);
+    const eyeMat = new THREE.MeshBasicMaterial({ color: 0xff0000 });
+    const eyeL = new THREE.Mesh(eyeGeo, eyeMat); eyeL.position.set(-0.3, 1.8, 0.35);
+    const eyeR = new THREE.Mesh(eyeGeo, eyeMat); eyeR.position.set(0.3, 1.8, 0.35);
+    monster.add(eyeL, eyeR);
+    monster.position.y = -30;
+    scene.add(monster);
+}
+
+/** УПРАВЛЕНИЕ **/
+function setupControls() {
+    const joyZone = document.getElementById('joy-zone');
+    const stick = document.getElementById('joy-stick');
+
+    window.ontouchstart = e => {
+        for(let t of e.changedTouches) {
+            const rect = joyZone.getBoundingClientRect();
+            // Нажат джойстик
+            if(t.clientX > rect.left && t.clientX < rect.right && t.clientY > rect.top && t.clientY < rect.bottom) {
+                joyData.id = t.identifier;
+                joyData.centerX = rect.left + rect.width/2;
+                joyData.centerY = rect.top + rect.height/2;
+            } 
+            // Обзор
+            else if(t.clientX > window.innerWidth/2) {
+                lookData.id = t.identifier;
+                lookData.lastX = t.clientX; lookData.lastY = t.clientY;
+                interact(t.clientX, t.clientY);
+            }
+        }
+    };
+
+    window.ontouchmove = e => {
+        for(let t of e.changedTouches) {
+            if(t.identifier === joyData.id) {
+                let dx = t.clientX - joyData.centerX;
+                let dy = t.clientY - joyData.centerY;
+                let dist = Math.min(Math.sqrt(dx*dx + dy*dy), 50);
+                let angle = Math.atan2(dy, dx);
+                stick.style.transform = `translate(${Math.cos(angle)*dist}px, ${Math.sin(angle)*dist}px)`;
+                
+                // ПРЯМОЕ УПРАВЛЕНИЕ: тянем вверх (dy < 0) -> идем вперед (f > 0)
+                moveDir.s = (Math.cos(angle)*dist) / 50;
+                moveDir.f = -(Math.sin(angle)*dist) / 50; 
+            }
+            if(t.identifier === lookData.id) {
+                let dx = t.clientX - lookData.lastX;
+                let dy = t.clientY - lookData.lastY;
+                camera.rotation.y -= dx * stats.sens;
+                camera.rotation.x -= dy * stats.sens;
+                camera.rotation.x = Math.max(-1.4, Math.min(1.4, camera.rotation.x));
+                lookData.lastX = t.clientX; lookData.lastY = t.clientY;
+            }
+        }
+    };
+
+    window.ontouchend = e => {
+        for(let t of e.changedTouches) {
+            if(t.identifier === joyData.id) {
+                joyData.id = null; moveDir = {f: 0, s: 0};
+                stick.style.transform = `translate(0,0)`;
+            }
+            if(t.identifier === lookData.id) lookData.id = null;
+        }
+    };
+
+    const sBtn = document.getElementById('sprint-btn');
+    sBtn.ontouchstart = (e) => { e.preventDefault(); stats.isSprinting = true; };
+    sBtn.ontouchend = (e) => { e.preventDefault(); stats.isSprinting = false; };
+}
+
+/** КОЛЛИЗИИ **/
+function checkCollision(pos) {
+    for(let t of trees) {
+        let dx = pos.x - t.position.x;
+        let dz = pos.z - t.position.z;
+        if(Math.sqrt(dx*dx + dz*dz) < 1.1) return true;
+    }
+    return false;
+}
+
+function interact(x, y) {
+    const ray = new THREE.Raycaster();
+    const mouse = new THREE.Vector2((x/window.innerWidth)*2-1, -(y/window.innerHeight)*2+1);
+    ray.setFromCamera(mouse, camera);
+    const hits = ray.intersectObjects(notes);
+    if(hits.length > 0 && hits[0].distance < 5) {
+        let obj = hits[0].object;
+        if(obj.visible) {
+            obj.visible = false;
+            stats.notes++;
+            document.getElementById('notes-text').innerText = `ЗАПИСКИ: ${stats.notes} / 10`;
+            playSnd(300, 'square', 0.2, 0.2);
+            let sIdx = randomScreamerIndices.indexOf(obj.userData.id);
+            if(sIdx !== -1) triggerScreamer(screamerImages[sIdx], false);
+        }
+    }
+}
+
+function triggerScreamer(img, isDeath) {
+    const s = document.getElementById('screamer');
+    s.style.backgroundImage = `url('${img}')`;
+    s.style.display = 'block';
+    playSnd(50, 'sawtooth', 1.2, 0.8);
+    setTimeout(() => {
+        s.style.display = 'none';
+        if(isDeath) location.reload();
+    }, 1200);
+}
+
+function updateMonster(dt) {
+    if(stats.notes < 3) return;
+    const dist = camera.position.distanceTo(monster.position);
+
+    if(monsterState === 'idle') monsterState = 'stalk';
+    if(monsterState === 'stalk' && Math.random() < 0.006) {
+        let a = camera.rotation.y + Math.PI + (Math.random()-0.5)*2;
+        monster.position.set(camera.position.x + Math.sin(a)*18, 2.2, camera.position.z + Math.cos(a)*18);
+    }
+
+    if(stats.notes >= 5 && monsterState === 'stalk') { 
+        monsterState = 'attack5'; monsterTime = 30; 
+        document.getElementById('blood').style.display = 'block';
+    }
+    if(stats.notes >= 9 && monsterState !== 'attack9') { 
+        monsterState = 'attack9'; monsterTime = 60; 
+        document.getElementById('blood').style.display = 'block';
+    }
+
+    if(monsterState.includes('attack')) {
+        monsterTime -= dt;
+        let dir = new THREE.Vector3().subVectors(camera.position, monster.position).normalize();
+        monster.position.add(dir.multiplyScalar(0.095));
+        monster.lookAt(camera.position.x, 2.2, camera.position.z);
+        if(dist < 1.8) triggerScreamer("death.png", true);
+        if(monsterTime <= 0) {
+            monsterState = 'stalk';
+            document.getElementById('blood').style.display = 'none';
+        }
+    }
+    if(dist < 1.6) triggerScreamer("death.png", true);
+}
+
+function animate() {
+    requestAnimationFrame(animate);
+    const dt = clock.getDelta();
+
+    // Стамина
+    if(stats.isSprinting && (Math.abs(moveDir.f) > 0.1 || Math.abs(moveDir.s) > 0.1) && stats.stamina > 0) {
+        stats.stamina -= 30 * dt;
+    } else {
+        stats.stamina = Math.min(100, stats.stamina + 15 * dt);
+    }
+    document.getElementById('stamina-fill').style.width = stats.stamina + '%';
+
+    let speed = (stats.isSprinting && stats.stamina > 5) ? 0.25 : 0.12;
+    
+    let oldPos = camera.position.clone();
+    camera.translateZ(-moveDir.f * speed);
+    camera.translateX(moveDir.s * speed);
+    camera.position.y = 1.8;
+
+    if(checkCollision(camera.position)) camera.position.copy(oldPos);
+
+    updateMonster(dt);
+    renderer.render(scene, camera);
+}
+
+/** СТАРТ И ПОЛНЫЙ ЭКРАН **/
+document.getElementById('start-btn').onclick = () => {
+    // Включаем настоящий полноэкранный режим
+    const de = document.documentElement;
+    if (de.requestFullscreen) de.requestFullscreen();
+    else if (de.webkitRequestFullscreen) de.webkitRequestFullscreen();
+    else if (de.msRequestFullscreen) de.msRequestFullscreen();
+
+    // Блокируем ориентацию (если поддерживается)
+    if (screen.orientation && screen.orientation.lock) {
+        screen.orientation.lock('landscape').catch(() => {});
+    }
+
+    stats.sens = document.getElementById('sens').value * 0.00004;
+    masterGain.gain.value = document.getElementById('vol').value / 100;
+    audioCtx.resume();
+    document.getElementById('menu').style.display = 'none';
+    document.getElementById('hud').style.display = 'block';
+    init();
+};
+
+window.onresize = () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+};
+</script>
+</body>
+</html>
