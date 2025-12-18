@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <title>Forest Horror Optimized</title>
+    <style>
+        * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+        body { margin: 0; overflow: hidden; background: #000; font-family: sans-serif; user-select: none; touch-action: none; }
+        #menu {
+            position: fixed; inset: 0; background: #000; color: #f00;
+            display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 1000;
+        }
+        .slider-group { margin: 10px; text-align: center; width: 70%; max-width: 400px; color: #fff; }
+        input[type=range] { width: 100%; height: 40px; accent-color: #f00; }
+        #start-btn { padding: 15px 50px; font-size: 24px; background: #300; color: #fff; border: 2px solid #f00; border-radius: 5px; cursor: pointer; margin-top: 20px; }
+        #hud { position: absolute; top: 20px; left: 20px; color: white; display: none; z-index: 50; pointer-events: none; }
+        #stamina-box { width: 120px; height: 6px; background: #222; border: 1px solid #fff; margin-top: 5px; }
+        #stamina-fill { width: 100%; height: 100%; background: #0f0; }
+        #joy-zone { position: absolute; bottom: 30px; left: 30px; width: 120px; height: 120px; background: rgba(255,255,255,0.05); border-radius: 50%; border: 1px solid rgba(255,255,255,0.1); }
+        #joy-stick { position: absolute; width: 50px; height: 50px; background: rgba(255,255,255,0.2); border-radius: 50%; top: 35px; left: 35px; }
+        #sprint-btn { position: absolute; bottom: 40px; right: 40px; width: 80px; height: 80px; background: rgba(150,0,0,0.2); border: 2px solid #fff; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: white; font-weight: bold; }
+        #screamer { position: fixed; inset: 0; background-color: black; background-position: center; background-size: cover; display: none; z-index: 2000; }
+        #blood { position: fixed; inset: 0; background: rgba(180, 0, 0, 0.2); display: none; pointer-events: none; }
+    </style>
+</head>
+<body>
+
+<div id="menu">
+    <h1 style="letter-spacing: 5px;">ЛЕС</h1>
+    <div class="slider-group"><label>ЧУВСТВИТЕЛЬНОСТЬ</label><br><input type="range" id="sens" min="5" max="100" value="50"></div>
+    <div class="slider-group"><label>ГРОМКОСТЬ</label><br><input type="range" id="vol" min="0" max="100" value="70"></div>
+    <button id="start-btn">ИГРАТЬ</button>
+</div>
+
+<div id="hud">
+    <div id="notes-text" style="font-size: 18px; font-weight: bold;">ЗАПИСКИ: 0 / 10</div>
+    <div id="stamina-box"><div id="stamina-fill"></div></div>
+</div>
+
+<div id="blood"></div>
+<div id="screamer"></div>
+<div id="joy-zone"><div id="joy-stick"></div></div>
+<div id="sprint-btn">БЕГ</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+<script>
+/** ОПТИМИЗИРОВАННЫЙ ДВИЖЕК **/
+let scene, camera, renderer, clock, flashlight;
+let moveDir = { f: 0, s: 0 };
+let lookData = { id: null, lastX: 0, lastY: 0 };
+let joyData = { id: null, centerX: 0, centerY: 0 };
+let stats = { notes: 0, stamina: 100, isSprinting: false, sens: 0.002 };
+let monster, monsterState = 'idle', monsterTime = 0;
+let treePositions = [], notes = [], randomScreamerIndices = [];
+
+const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+let masterGain = audioCtx.createGain();
+masterGain.connect(audioCtx.destination);
+
+function playSnd(freq, type, duration, vol) {
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    const osc = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+    g.gain.setValueAtTime(vol, audioCtx.currentTime);
+    g.gain.linearRampToValueAtTime(0, audioCtx.currentTime + duration);
+    osc.connect(g); g.connect(masterGain);
+    osc.start(); osc.stop(audioCtx.currentTime + duration);
+}
+
+function init() {
+    scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x000105);
+    scene.fog = new THREE.Fog(0x000105, 1, 35); // Линейный туман быстрее
+
+    camera = new THREE.PerspectiveCamera(70, window.innerWidth/window.innerHeight, 0.1, 100);
+    camera.rotation.order = 'YXZ';
+    
+    renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: "high-performance" });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    // ОГРАНИЧЕНИЕ RESOLUTION ДЛЯ FPS
+    renderer.setPixelRatio(1); 
+    document.body.appendChild(renderer.domElement);
+
+    flashlight = new THREE.PointLight(0xffffff, 4, 25);
+    camera.add(flashlight);
+    flashlight.position.set(0, 0, 1);
+    scene.add(camera);
+
+    // ПОЛ
+    const ground = new THREE.Mesh(new THREE.PlaneGeometry(300, 300), new THREE.MeshBasicMaterial({ color: 0x050805 }));
+    ground.rotation.x = -Math.PI/2;
+    scene.add(ground);
+
+    // ИНСТАНСИНГ ДЕРЕВЬЕВ (Рисует всё за 1 вызов)
+    const treeGeo = new THREE.CylinderGeometry(0.4, 0.6, 10, 5);
+    const treeMat = new THREE.MeshBasicMaterial({ color: 0x0a0500 });
+    const instancedTrees = new THREE.InstancedMesh(treeGeo, treeMat, 160);
+    const dummy = new THREE.Object3D();
+
+    for(let i=0; i<160; i++) {
+        let x = Math.random()*180-90;
+        let z = Math.random()*180-90;
+        dummy.position.set(x, 5, z);
+        dummy.updateMatrix();
+        instancedTrees.setMatrixAt(i, dummy.matrix);
+        treePositions.push({x: x, z: z});
+
+        // Записки (только 10 шт)
+        if(i < 10) {
+            let note = new THREE.Mesh(new THREE.PlaneGeometry(0.4, 0.5), new THREE.MeshBasicMaterial({ color: 0xffffff }));
+            note.position.set(x, 1.5, z + 0.61);
+            note.userData = { id: i };
+            scene.add(note);
+            notes.push(note);
+        }
+    }
+    scene.add(instancedTrees);
+
+    while(randomScreamerIndices.length < 3) {
+        let r = Math.floor(Math.random()*10);
+        if(!randomScreamerIndices.includes(r)) randomScreamerIndices.push(r);
+    }
+
+    createMonster();
+    clock = new THREE.Clock();
+    setupControls();
+    animate();
+}
+
+function createMonster() {
+    monster = new THREE.Group();
+    const body = new THREE.Mesh(new THREE.BoxGeometry(1, 4, 0.5), new THREE.MeshBasicMaterial({ color: 0x000000 }));
+    monster.add(body);
+    const eyeGeo = new THREE.BoxGeometry(0.2, 0.1, 0.1);
+    const eyeMat = new THREE.MeshBasicMaterial({ color: 0xff0000 });
+    const eL = new THREE.Mesh(eyeGeo, eyeMat); eL.position.set(-0.25, 1.6, 0.3);
+    const eR = new THREE.Mesh(eyeGeo, eyeMat); eR.position.set(0.25, 1.6, 0.3);
+    monster.add(eL, eR);
+    monster.position.y = -20;
+    scene.add(monster);
+}
+
+function setupControls() {
+    const joyZone = document.getElementById('joy-zone');
+    const stick = document.getElementById('joy-stick');
+
+    window.ontouchstart = e => {
+        for(let t of e.changedTouches) {
+            const rect = joyZone.getBoundingClientRect();
+            if(t.clientX > rect.left && t.clientX < rect.right && t.clientY > rect.top && t.clientY < rect.bottom) {
+                joyData.id = t.identifier;
+                joyData.centerX = rect.left + rect.width/2;
+                joyData.centerY = rect.top + rect.height/2;
+            } else if(t.clientX > window.innerWidth/2) {
+                lookData.id = t.identifier;
+                lookData.lastX = t.clientX; lookData.lastY = t.clientY;
+                interact(t.clientX, t.clientY);
+            }
+        }
+    };
+
+    window.ontouchmove = e => {
+        for(let t of e.changedTouches) {
+            if(t.identifier === joyData.id) {
+                let dx = t.clientX - joyData.centerX;
+                let dy = t.clientY - joyData.centerY;
+                let dist = Math.min(Math.sqrt(dx*dx + dy*dy), 40);
+                let angle = Math.atan2(dy, dx);
+                stick.style.transform = `translate(${Math.cos(angle)*dist}px, ${Math.sin(angle)*dist}px)`;
+                moveDir.s = dx / 40;
+                moveDir.f = -dy / 40; 
+            }
+            if(t.identifier === lookData.id) {
+                camera.rotation.y -= (t.clientX - lookData.lastX) * stats.sens;
+                camera.rotation.x -= (t.clientY - lookData.lastY) * stats.sens;
+                camera.rotation.x = Math.max(-1.3, Math.min(1.3, camera.rotation.x));
+                lookData.lastX = t.clientX; lookData.lastY = t.clientY;
+            }
+        }
+    };
+
+    window.ontouchend = e => {
+        for(let t of e.changedTouches) {
+            if(t.identifier === joyData.id) {
+                joyData.id = null; moveDir = {f:0, s:0};
+                stick.style.transform = `translate(0,0)`;
+            }
+            if(t.identifier === lookData.id) lookData.id = null;
+        }
+    };
+    document.getElementById('sprint-btn').ontouchstart = (e) => { e.preventDefault(); stats.isSprinting = true; };
+    document.getElementById('sprint-btn').ontouchend = (e) => { e.preventDefault(); stats.isSprinting = false; };
+}
+
+function checkCollision(pos) {
+    for(let i=0; i<treePositions.length; i++) {
+        let t = treePositions[i];
+        let dx = pos.x - t.x;
+        let dz = pos.z - t.z;
+        // Квадрат расстояния быстрее чем корень
+        if((dx*dx + dz*dz) < 0.8) return true;
+    }
+    return false;
+}
+
+function interact(x, y) {
+    const ray = new THREE.Raycaster();
+    const mouse = new THREE.Vector2((x/window.innerWidth)*2-1, -(y/window.innerHeight)*2+1);
+    ray.setFromCamera(mouse, camera);
+    const hits = ray.intersectObjects(notes);
+    if(hits.length > 0 && hits[0].distance < 4) {
+        let obj = hits[0].object;
+        if(obj.visible) {
+            obj.visible = false;
+            stats.notes++;
+            document.getElementById('notes-text').innerText = `ЗАПИСКИ: ${stats.notes} / 10`;
+            playSnd(300, 'square', 0.1, 0.2);
+            let sIdx = randomScreamerIndices.indexOf(obj.userData.id);
+            if(sIdx !== -1) triggerScreamer(`scary${sIdx+1}.png`, false);
+        }
+    }
+}
+
+function triggerScreamer(img, kill) {
+    const s = document.getElementById('screamer');
+    s.style.backgroundImage = `url('${img}')`;
+    s.style.display = 'block';
+    playSnd(50, 'sawtooth', 1, 0.8);
+    setTimeout(() => {
+        s.style.display = 'none';
+        if(kill) location.reload();
+    }, 1000);
+}
+
+function updateMonster(dt) {
+    if(stats.notes < 3) return;
+    const distSq = camera.position.distanceToSquared(monster.position);
+
+    if(monsterState === 'idle') monsterState = 'stalk';
+    if(monsterState === 'stalk' && Math.random() < 0.007) {
+        let a = camera.rotation.y + Math.PI + (Math.random()-0.5)*2;
+        monster.position.set(camera.position.x + Math.sin(a)*15, 2, camera.position.z + Math.cos(a)*15);
+    }
+
+    if(stats.notes >= 5 && monsterState === 'stalk') { 
+        monsterState = 'attack5'; monsterTime = 30; 
+        document.getElementById('blood').style.display = 'block';
+    }
+    if(stats.notes >= 9 && monsterState !== 'attack9') { 
+        monsterState = 'attack9'; monsterTime = 60; 
+        document.getElementById('blood').style.display = 'block';
+    }
+
+    if(monsterState.includes('attack')) {
+        monsterTime -= dt;
+        let dir = new THREE.Vector3().subVectors(camera.position, monster.position).normalize();
+        monster.position.add(dir.multiplyScalar(0.08));
+        monster.lookAt(camera.position.x, 2, camera.position.z);
+        if(distSq < 2.5) triggerScreamer("death.png", true);
+        if(monsterTime <= 0) {
+            monsterState = 'stalk';
+            document.getElementById('blood').style.display = 'none';
+        }
+    }
+}
+
+function animate() {
+    requestAnimationFrame(animate);
+    const dt = Math.min(clock.getDelta(), 0.1);
+
+    if(stats.isSprinting && (moveDir.f !== 0 || moveDir.s !== 0) && stats.stamina > 0) {
+        stats.stamina -= 25 * dt;
+    } else {
+        stats.stamina = Math.min(100, stats.stamina + 15 * dt);
+    }
+    document.getElementById('stamina-fill').style.width = stats.stamina + '%';
+
+    let speed = (stats.isSprinting && stats.stamina > 5) ? 0.2 : 0.1;
+    let oldPos = camera.position.clone();
+    
+    camera.translateZ(-moveDir.f * speed);
+    camera.translateX(moveDir.s * speed);
+    camera.position.y = 1.7;
+
+    if(checkCollision(camera.position)) camera.position.copy(oldPos);
+
+    updateMonster(dt);
+    renderer.render(scene, camera);
+}
+
+document.getElementById('start-btn').onclick = () => {
+    if (document.documentElement.requestFullscreen) document.documentElement.requestFullscreen();
+    stats.sens = document.getElementById('sens').value * 0.00005;
+    masterGain.gain.value = document.getElementById('vol').value / 100;
+    audioCtx.resume();
+    document.getElementById('menu').style.display = 'none';
+    document.getElementById('hud').style.display = 'block';
+    init();
+};
+</script>
+</body>
+</html>
