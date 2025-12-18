@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <title>Forest Horror: Light Fixed</title>
+    <style>
+        * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+        body { margin: 0; overflow: hidden; background: #000; font-family: 'Courier New', monospace; user-select: none; touch-action: none; }
+        canvas { display: block; }
+
+        /* МЕНЮ */
+        #menu {
+            position: fixed; inset: 0; background: radial-gradient(circle, #1a0000 0%, #000 100%);
+            color: #f00; display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 1000;
+        }
+        #menu h1 { font-size: 60px; text-shadow: 0 0 20px #f00; margin: 0; letter-spacing: 15px; }
+        .slider-group { margin: 15px; text-align: center; width: 75%; max-width: 400px; color: #fff; }
+        input[type=range] { width: 100%; height: 35px; accent-color: #f00; }
+        #start-btn { 
+            padding: 15px 50px; font-size: 24px; background: #300; color: #fff; border: 2px solid #f00; 
+            border-radius: 5px; cursor: pointer; margin-top: 25px; box-shadow: 0 0 15px #f00;
+        }
+
+        /* ИНТЕРФЕЙС (HUD) */
+        #hud { position: absolute; top: 20px; left: 20px; color: white; display: none; z-index: 50; pointer-events: none; }
+        .bar-container { width: 150px; height: 10px; background: #222; border: 1px solid #fff; margin-top: 5px; margin-bottom: 10px; }
+        #stamina-fill { width: 100%; height: 100%; background: #0f0; }
+        #battery-fill { width: 100%; height: 100%; background: #0cf; }
+        #notes-text { font-size: 20px; font-weight: bold; text-shadow: 2px 2px #000; }
+
+        /* УПРАВЛЕНИЕ */
+        #joy-zone { 
+            position: absolute; bottom: 40px; left: 40px; width: 130px; height: 130px; 
+            background: rgba(255,255,255,0.05); border-radius: 50%; border: 2px solid rgba(255,255,255,0.1); 
+        }
+        #joy-stick { 
+            position: absolute; width: 50px; height: 50px; background: rgba(255,255,255,0.3); 
+            border-radius: 50%; top: 40px; left: 40px; pointer-events: none;
+        }
+        #sprint-btn { 
+            position: absolute; bottom: 40px; right: 40px; width: 80px; height: 80px; 
+            background: rgba(150,0,0,0.2); border: 2px solid #fff; border-radius: 50%; 
+            display: flex; align-items: center; justify-content: center; color: white; font-weight: bold;
+        }
+        #flashlight-btn { 
+            position: absolute; bottom: 135px; right: 40px; width: 60px; height: 60px; 
+            background: rgba(0,200,255,0.2); border: 2px solid #0cf; border-radius: 50%; 
+            display: flex; align-items: center; justify-content: center; color: white; font-size: 12px; font-weight: bold;
+        }
+
+        #screamer { position: fixed; inset: 0; background-color: black; background-position: center; background-size: cover; display: none; z-index: 2000; }
+        #blood { position: fixed; inset: 0; background: rgba(180, 0, 0, 0.3); display: none; pointer-events: none; }
+        #crosshair { position: fixed; top: 50%; left: 50%; width: 4px; height: 4px; background: #fff; border-radius: 50%; transform: translate(-50%, -50%); opacity: 0.5; }
+    </style>
+</head>
+<body>
+
+<div id="menu">
+    <h1>ЛЕС</h1>
+    <div class="slider-group">
+        <label>ЧУВСТВИТЕЛЬНОСТЬ</label><br>
+        <input type="range" id="sens" min="10" max="150" value="70">
+    </div>
+    <div class="slider-group">
+        <label>ГРОМКОСТЬ</label><br>
+        <input type="range" id="vol" min="0" max="100" value="70">
+    </div>
+    <button id="start-btn">ИГРАТЬ</button>
+</div>
+
+<div id="hud">
+    <div id="notes-text">ЗАПИСКИ: 0 / 10</div>
+    <div style="font-size: 11px; margin-top:5px;">ВЫНОСЛИВОСТЬ</div>
+    <div class="bar-container"><div id="stamina-fill"></div></div>
+    <div style="font-size: 11px;">БАТАРЕЯ СВЕТА</div>
+    <div class="bar-container"><div id="battery-fill"></div></div>
+</div>
+
+<div id="blood"></div>
+<div id="screamer"></div>
+<div id="crosshair"></div>
+<div id="joy-zone"><div id="joy-stick"></div></div>
+<div id="sprint-btn">БЕГ</div>
+<div id="flashlight-btn">СВЕТ</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+<script>
+/** ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ **/
+let scene, camera, renderer, clock, flashlight, nearLight;
+let moveDir = { f: 0, s: 0 };
+let lookData = { id: null, lastX: 0, lastY: 0 };
+let joyData = { id: null, centerX: 0, centerY: 0 };
+let stats = { 
+    notes: 0, 
+    stamina: 100, 
+    isSprinting: false, 
+    sens: 0.002, 
+    battery: 100, 
+    lightOn: true 
+};
+let monster, monsterState = 'idle', monsterTime = 0;
+let treePositions = [], notes = [], randomScreamerIndices = [];
+
+// Звук
+const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+let masterGain = audioCtx.createGain();
+masterGain.connect(audioCtx.destination);
+const screamAudio = new Audio('scream.mp3');
+
+function playSndEffect(freq, type, duration, vol) {
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    const osc = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+    g.gain.setValueAtTime(vol, audioCtx.currentTime);
+    osc.connect(g); g.connect(masterGain);
+    osc.start(); osc.stop(audioCtx.currentTime + duration);
+}
+
+function playScreamMP3() {
+    screamAudio.volume = masterGain.gain.value;
+    screamAudio.currentTime = 0;
+    screamAudio.play().catch(() => {});
+}
+
+function init() {
+    scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x000105);
+    scene.fog = new THREE.FogExp2(0x000105, 0.05); // Оптимальный туман
+
+    camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
+    camera.rotation.order = 'YXZ';
+    
+    renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(1);
+    document.body.appendChild(renderer.domElement);
+
+    // --- СИСТЕМА СВЕТА ---
+    // 1. Дальний луч (SpotLight)
+    flashlight = new THREE.SpotLight(0xffffff, 15, 150, Math.PI/6, 0.4, 0.5);
+    flashlight.position.set(0, 0, 0.1);
+    flashlight.target = new THREE.Object3D();
+    camera.add(flashlight);
+    camera.add(flashlight.target);
+    flashlight.target.position.set(0, 0, -1);
+
+    // 2. Ближний свет вокруг игрока (PointLight)
+    nearLight = new THREE.PointLight(0xffffff, 2, 10);
+    camera.add(nearLight);
+
+    scene.add(camera);
+
+    // ПОЛ
+    const ground = new THREE.Mesh(new THREE.PlaneGeometry(600, 600), new THREE.MeshPhongMaterial({ color: 0x050805 }));
+    ground.rotation.x = -Math.PI/2;
+    scene.add(ground);
+
+    // ДЕРЕВЬЯ
+    const treeGeo = new THREE.CylinderGeometry(0.4, 0.6, 12, 6);
+    const treeMat = new THREE.MeshPhongMaterial({ color: 0x110a05 });
+    const instancedTrees = new THREE.InstancedMesh(treeGeo, treeMat, 180);
+    const dummy = new THREE.Object3D();
+
+    for(let i=0; i<180; i++) {
+        let x = Math.random()*250-125;
+        let z = Math.random()*250-125;
+        dummy.position.set(x, 6, z);
+        dummy.updateMatrix();
+        instancedTrees.setMatrixAt(i, dummy.matrix);
+        treePositions.push({x: x, z: z});
+
+        if(i < 10) {
+            let note = new THREE.Mesh(
+                new THREE.PlaneGeometry(0.5, 0.6), 
+                new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0xffffff, emissiveIntensity: 2.5 })
+            );
+            note.position.set(x, 1.8, z + 0.65);
+            note.userData = { id: i };
+            scene.add(note);
+            notes.push(note);
+            let nLight = new THREE.PointLight(0xffffff, 3, 10);
+            nLight.position.set(x, 1.8, z + 0.8);
+            scene.add(nLight);
+        }
+    }
+    scene.add(instancedTrees);
+
+    while(randomScreamerIndices.length < 3) {
+        let r = Math.floor(Math.random()*10);
+        if(!randomScreamerIndices.includes(r)) randomScreamerIndices.push(r);
+    }
+
+    createMonster();
+    clock = new THREE.Clock();
+    setupControls();
+    animate();
+}
+
+function createMonster() {
+    monster = new THREE.Group();
+    const blackMat = new THREE.MeshBasicMaterial({ color: 0x000000 });
+    const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.4, 3.5, 6), blackMat);
+    monster.add(torso);
+    const head = new THREE.Mesh(new THREE.SphereGeometry(0.4, 8, 8), blackMat); head.position.y = 2.0;
+    monster.add(head);
+    const armGeo = new THREE.CylinderGeometry(0.08, 0.08, 4.5, 4);
+    const armL = new THREE.Mesh(armGeo, blackMat); armL.position.set(-0.7, 0.5, 0); armL.rotation.z = 0.2;
+    const armR = new THREE.Mesh(armGeo, blackMat); armR.position.set(0.7, 0.5, 0); armR.rotation.z = -0.2;
+    monster.add(armL, armR);
+    const eyeMat = new THREE.MeshBasicMaterial({ color: 0xff0000 });
+    const eL = new THREE.Mesh(new THREE.SphereGeometry(0.14, 8, 8), eyeMat); eL.position.set(-0.15, 2.0, 0.35);
+    const eR = new THREE.Mesh(new THREE.SphereGeometry(0.14, 8, 8), eyeMat); eR.position.set(0.15, 2.0, 0.35);
+    monster.add(eL, eR);
+    monster.position.y = -30;
+    scene.add(monster);
+}
+
+function setupControls() {
+    const joyZone = document.getElementById('joy-zone');
+    const stick = document.getElementById('joy-stick');
+    const flashBtn = document.getElementById('flashlight-btn');
+
+    window.ontouchstart = e => {
+        for(let t of e.changedTouches) {
+            const rect = joyZone.getBoundingClientRect();
+            if(t.clientX > rect.left && t.clientX < rect.right && t.clientY > rect.top && t.clientY < rect.bottom) {
+                joyData.id = t.identifier;
+                joyData.centerX = rect.left + rect.width/2;
+                joyData.centerY = rect.top + rect.height/2;
+            } else if(t.clientX > window.innerWidth/2) {
+                lookData.id = t.identifier;
+                lookData.lastX = t.clientX; lookData.lastY = t.clientY;
+                interact(t.clientX, t.clientY);
+            }
+        }
+    };
+
+    window.ontouchmove = e => {
+        for(let t of e.changedTouches) {
+            if(t.identifier === joyData.id) {
+                let dx = t.clientX - joyData.centerX;
+                let dy = t.clientY - joyData.centerY;
+                let dist = Math.min(Math.sqrt(dx*dx + dy*dy), 50);
+                let angle = Math.atan2(dy, dx);
+                stick.style.transform = `translate(${Math.cos(angle)*dist}px, ${Math.sin(angle)*dist}px)`;
+                moveDir.s = dx / 50; moveDir.f = -dy / 50; 
+            }
+            if(t.identifier === lookData.id) {
+                camera.rotation.y -= (t.clientX - lookData.lastX) * stats.sens;
+                camera.rotation.x -= (t.clientY - lookData.lastY) * stats.sens;
+                camera.rotation.x = Math.max(-1.4, Math.min(1.4, camera.rotation.x));
+                lookData.lastX = t.clientX; lookData.lastY = t.clientY;
+            }
+        }
+    };
+
+    window.ontouchend = e => {
+        for(let t of e.changedTouches) {
+            if(t.identifier === joyData.id) { joyData.id = null; moveDir = {f:0, s:0}; stick.style.transform = `translate(0,0)`; }
+            if(t.identifier === lookData.id) lookData.id = null;
+        }
+    };
+
+    document.getElementById('sprint-btn').ontouchstart = e => { e.preventDefault(); stats.isSprinting = true; };
+    document.getElementById('sprint-btn').ontouchend = e => { e.preventDefault(); stats.isSprinting = false; };
+    
+    // КНОПКА СВЕТА
+    flashBtn.ontouchstart = e => {
+        e.preventDefault();
+        if(stats.battery > 0) {
+            stats.lightOn = !stats.lightOn;
+            flashlight.visible = stats.lightOn;
+            nearLight.visible = stats.lightOn;
+            playSndEffect(800, 'square', 0.1, 0.1);
+            flashBtn.style.background = stats.lightOn ? "rgba(0,200,255,0.4)" : "rgba(0,0,0,0.4)";
+        }
+    };
+}
+
+function checkCollision(pos) {
+    for(let i=0; i<treePositions.length; i++) {
+        let t = treePositions[i];
+        let dx = pos.x - t.x;
+        let dz = pos.z - t.z;
+        if((dx*dx + dz*dz) < 1.1) return true;
+    }
+    return false;
+}
+
+function interact(x, y) {
+    const ray = new THREE.Raycaster();
+    const mouse = new THREE.Vector2((x/window.innerWidth)*2-1, -(y/window.innerHeight)*2+1);
+    ray.setFromCamera(mouse, camera);
+    const hits = ray.intersectObjects(notes);
+    if(hits.length > 0 && hits[0].distance < 6) {
+        let obj = hits[0].object;
+        if(obj.visible) {
+            obj.visible = false;
+            stats.notes++;
+            document.getElementById('notes-text').innerText = `ЗАПИСКИ: ${stats.notes} / 10`;
+            playSndEffect(300, 'square', 0.2, 0.2);
+            let sIdx = randomScreamerIndices.indexOf(obj.userData.id);
+            if(sIdx !== -1) triggerScreamer(`scary${sIdx+1}.png`, false);
+        }
+    }
+}
+
+function triggerScreamer(img, kill) {
+    const s = document.getElementById('screamer');
+    s.style.backgroundImage = `url('${img}')`;
+    s.style.display = 'block';
+    playScreamMP3();
+    setTimeout(() => {
+        s.style.display = 'none';
+        if(kill) location.reload();
+    }, 1200);
+}
+
+function updateMonster(dt) {
+    if(stats.notes < 3) return;
+    const distSq = camera.position.distanceToSquared(monster.position);
+    if(monsterState === 'idle') monsterState = 'stalk';
+    if(monsterState === 'stalk' && Math.random() < 0.007) {
+        let a = camera.rotation.y + Math.PI + (Math.random()-0.5)*2;
+        monster.position.set(camera.position.x + Math.sin(a)*18, 2.5, camera.position.z + Math.cos(a)*18);
+    }
+    if(stats.notes >= 5 && monsterState === 'stalk') { monsterState = 'attack5'; monsterTime = 30; document.getElementById('blood').style.display = 'block'; }
+    if(stats.notes >= 9 && monsterState !== 'attack9') { monsterState = 'attack9'; monsterTime = 60; document.getElementById('blood').style.display = 'block'; }
+    if(monsterState.includes('attack')) {
+        monsterTime -= dt;
+        let dir = new THREE.Vector3().subVectors(camera.position, monster.position).normalize();
+        monster.position.add(dir.multiplyScalar(0.1));
+        monster.lookAt(camera.position.x, 2.5, camera.position.z);
+        if(distSq < 2.8) triggerScreamer("death.png", true);
+        if(monsterTime <= 0) { monsterState = 'stalk'; document.getElementById('blood').style.display = 'none'; }
+    }
+    if(distSq < 2.2) triggerScreamer("death.png", true);
+}
+
+function animate() {
+    requestAnimationFrame(animate);
+    const dt = Math.min(clock.getDelta(), 0.1);
+
+    // Стамина
+    if(stats.isSprinting && (moveDir.f !== 0 || moveDir.s !== 0) && stats.stamina > 0) {
+        stats.stamina -= 30 * dt;
+    } else {
+        stats.stamina = Math.min(100, stats.stamina + 15 * dt);
+    }
+    document.getElementById('stamina-fill').style.width = stats.stamina + '%';
+
+    // БАТАРЕЯ
+    if(stats.lightOn) {
+        stats.battery -= 1.8 * dt; // Садится
+        if(stats.battery <= 0) {
+            stats.battery = 0; stats.lightOn = false;
+            flashlight.visible = false; nearLight.visible = false;
+        }
+    } else {
+        stats.battery = Math.min(100, stats.battery + 12 * dt); // Заряжается
+    }
+    document.getElementById('battery-fill').style.width = stats.battery + '%';
+
+    let speed = (stats.isSprinting && stats.stamina > 5) ? 0.25 : 0.12;
+    let oldPos = camera.position.clone();
+    camera.translateZ(-moveDir.f * speed);
+    camera.translateX(moveDir.s * speed);
+    camera.position.y = 1.8;
+    if(checkCollision(camera.position)) camera.position.copy(oldPos);
+
+    updateMonster(dt);
+    renderer.render(scene, camera);
+}
+
+document.getElementById('start-btn').onclick = () => {
+    const de = document.documentElement;
+    if (de.requestFullscreen) de.requestFullscreen();
+    else if (de.webkitRequestFullscreen) de.webkitRequestFullscreen();
+    stats.sens = document.getElementById('sens').value * 0.000045;
+    masterGain.gain.value = document.getElementById('vol').value / 100;
+    audioCtx.resume();
+    document.getElementById('menu').style.display = 'none';
+    document.getElementById('hud').style.display = 'block';
+    init();
+};
+</script>
+</body>
+</html>
